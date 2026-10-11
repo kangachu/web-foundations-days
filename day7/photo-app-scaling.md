@@ -71,6 +71,7 @@ Instead, binary image files are stored in cost-effective, durable **Object Stora
                                | (Replication)
                                v
                     [ Read Replica DB ]         (Reads)```
+```
 ---
 
 
