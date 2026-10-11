@@ -70,8 +70,11 @@ Instead, binary image files are stored in cost-effective, durable **Object Stora
                                |
                                | (Replication)
                                v
-                     [ Read Replica DB ]         (Reads)
-         6. Component Explanations (One Sentence Each)
+                    [ Read Replica DB ]         (Reads)```
+---
+
+
+## 6. Component Explanations (One Sentence Each)
 CDN (Content Delivery Network): Caches popular photos and thumbnails physically close to users around the globe to deliver ultra-low read latency and minimize server bandwidth costs.
 
 Load Balancer: Distributes inbound user traffic uniformly across redundant application servers to prevent any single instance from becoming a bottleneck.
