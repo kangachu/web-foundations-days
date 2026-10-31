@@ -1,0 +1,8 @@
+```markdown
+# Course Reflection
+
+The most challenging concept in the course was designing high-concurrency architectures that remain resilient under massive load spikes, particularly understanding the practical trade-offs between ACID relational consistency and eventual consistency. Moving from standalone CRUD thinking to architecting decoupled systems with message queues, Redis cache invalidation strategies, and read-replica pools required a major shift in perspective. I overcame this challenge by breaking complex systems down into isolated request lifecycles—diagramming step-by-step how a write propagates through load balancers, application nodes, transactional databases, and background worker queues.
+
+Based on the feedback received during the QuickNotes capstone, the primary area I would improve is my client-side error recovery and cache revalidation logic. While the initial design implemented standard HTTP status checking and basic error banners, integrating optimistic UI updates alongside exponential backoff for failed network calls would make the application significantly more responsive under poor connectivity conditions.
+
+Moving forward, I will deepen my expertise in modern cloud-native backend development. Specifically, I plan to focus on Docker container orchestration, building production microservices with Go and Node.js, and mastering distributed caching patterns with Redis. Learning how to instrument system observability through Prometheus and Grafana will be my next milestone so I can monitor latency, throughput, and database bottlenecks in live production environments.
