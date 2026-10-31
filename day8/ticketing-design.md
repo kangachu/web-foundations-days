@@ -181,7 +181,6 @@ CREATE TABLE seats (
     FOREIGN KEY (held_by_user_id) REFERENCES users(id),
     UNIQUE (event_id, section, seat_number)
 );
-
 CREATE TABLE orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -193,33 +192,33 @@ CREATE TABLE orders (
     FOREIGN KEY (seat_id) REFERENCES seats(id)
 );
 Relationships
-Events to Seats (One-to-Many): One event contains many individual seat records. Each seat is linked to exactly one specific event.
+Events to Seats (One-to-Many): One event contains many individual seat records. Each seat belongs strictly to one event.
 
-Users to Seats (One-to-Many): A user can hold multiple seats across reservations, but each seat can only be leased to one user at any single instant.
+Users to Seats (One-to-Many): A user can hold multiple seats across active sessions, but an individual seat can only be leased to one user at any given time.
 
-Users to Orders (One-to-Many): One user can make many ticket purchase orders over time.
+Users to Orders (One-to-Many): A user can make multiple ticket purchase orders over time.
 
 Seats to Orders (One-to-One): A single confirmed seat maps to exactly one completed order row, enforced via the UNIQUE (seat_id) constraint on the orders table.
 5. Preventing Double-Booking: Transactions & Constraints
-Preventing two buyers from claiming the same seat relies on a two-phase reservation approach combining strict ACID relational guarantees with an in-memory lock:
+Preventing two buyers from purchasing the same seat relies on a two-phase reservation approach combining in-memory distributed locks with strict database-level ACID transactions:
 
 Atomic In-Memory Seat Holds (Redis + Redlock):
 
-When a user clicks "Hold Seat", the application issues an atomic atomic operation in Redis: SET seat:{id}:lock {userId} NX EX 600 (expires in 10 minutes).
-
-Because SET ... NX only succeeds if the key does not already exist, concurrent requests for the same seat fail immediately at the cache layer with zero database hits.
+When a user selects a seat to hold, the application executes an atomic command in Redis:
+SET seat:{seat_id}:lock {user_id} NX EX 600
+Because NX only succeeds if the key does not already exist, concurrent attempts on the same seat fail immediately at the cache layer with zero database overhead. The 600-second TTL (10 minutes) automatically releases the seat if checkout is abandoned.
 
 ACID Transactions with Pessimistic Row Locking (SELECT ... FOR UPDATE):
 
-When the user transitions from holding to final payment checkout, the database runs a transactional mutation:
+When the user transitions from holding to payment checkout, the database executes a pessimistic lock within a transaction:
 BEGIN TRANSACTION;
 
-SELECT id, status, hold_expires_at 
+SELECT id, status, held_by_user_id, hold_expires_at 
 FROM seats 
 WHERE id = 1204 
 FOR UPDATE;
 
--- Validation: Confirm seat is either available or held by this user within valid lease window
+-- Verify the seat is either free or held by this user within the valid lease window
 UPDATE seats 
 SET status = 'sold', held_by_user_id = 42, hold_expires_at = NULL 
 WHERE id = 1204 AND (status = 'available' OR (status = 'held' AND held_by_user_id = 42));
@@ -228,9 +227,15 @@ INSERT INTO orders (user_id, seat_id, total_amount, payment_status)
 VALUES (42, 1204, 100.00, 'completed');
 
 COMMIT;
-Database Unique Constraints:
+The FOR UPDATE clause places an exclusive lock on that seat row, preventing any other transaction from reading or mutating it until the current transaction commits or rolls back.
 
-The orders table includes a UNIQUE (seat_id) constraint, and the seats table has a composite UNIQUE (event_id, section, seat_number) constraint. Even in the extreme event of duplicate application threads bypassing in-memory checks, the database engine enforces physical uniqueness and rejects conflicting duplicate writes with an integrity error.
+Database Constraints as the Final Safety Net:
+
+The orders table includes a UNIQUE (seat_id) constraint.
+
+The seats table enforces UNIQUE (event_id, section, seat_number).
+
+Even if race conditions bypass application-layer checks, the database engine enforces physical uniqueness and rejects conflicting duplicate writes with an integrity error.
 
 6. Architecture & Flash Sale Survival
 Architecture Diagram
@@ -272,36 +277,37 @@ Architecture Diagram
                                                        v
                                             [ Read Replica Pool ]
                                             (Event Queries & Ticket Views)
+
                                             Component Explanations
-DNS: Directs global traffic to high-capacity edge points with DDoS mitigation.
+DNS: Translates human-readable domain names into anycast IP addresses with DDoS protection.
 
-CDN (Edge Cache): Serves cached event details, performer banners, and static SVG venue layouts directly from the nearest regional point of presence to eliminate backend hits for static data.
+CDN (Edge Cache): Serves cached event details, performer banners, and static SVG venue layouts directly from regional edge points, eliminating backend calls for static data.
 
-Virtual Waiting Room: Acts as a rate-limiting admission valve during flash sales, funneling 200,000 users into a fair FIFO tokenized queue and admitting only 2,000 users per minute into active checkout.
+Virtual Waiting Room: Acts as a rate-limiting valve during flash sales, funneling 200,000 concurrent users into an orderly queue and admitting only 2,000 users per minute into active checkout.
 
-Load Balancer: Distributes valid admitted user traffic evenly across stateless application server nodes.
+Load Balancer: Distributes admitted user traffic evenly across stateless application server nodes.
 
-App Servers: Executes session verification, request validation, and orchestrates distributed seat hold operations.
+App Servers: Runs business logic, validates request payloads, enforces authentication, and coordinates seat reservation workflows.
 
-Redis Cluster: Manages low-latency seat hold states, TTL expiration timers (10-minute releases), and distributed mutexes (NX keys) at memory speed.
+Redis Cluster: Manages seat hold states, TTL expiration timers (10-minute releases), and distributed mutexes at sub-millisecond memory speed.
 
-Message Queue: Absorbs payment confirmation jobs and ticketing generation payloads to insulate transactional databases from sudden write storms.
+Message Queue: Buffers payment confirmations and ticketing generation payloads to insulate transactional databases from sudden write storms.
 
-Order Workers: Consumes background jobs from the queue to generate printable PDF/QR-code tickets and send email confirmations asynchronously.
+Order Workers: Consumes background jobs from the queue to generate PDF/QR-code tickets and send email confirmations asynchronously.
 
 Primary Database (SQL): Enforces ACID transaction integrity, row-level locks (FOR UPDATE), and permanent ownership states for purchased seats.
 
-Read Replica Pool: Relieves the primary database by handling read traffic for user ticket lookups and browsing queries.
+Read Replica Pool: Offloads read-only traffic from the primary database, serving event queries and ticket lookups.
 
 7. Architectural Trade-offs
 Eventual Consistency vs. Real-Time Seat Map Display:
 
 Trade-off: Seat map read views are served via read replicas and Redis cache buffers with a 1-to-2-second TTL.
 
-Consequence: A seat that was claimed half a second ago might still appear available on an incoming user's screen. However, this is intentionally accepted because attempting real-time strong consistency across 200,000 simultaneous browsing sessions would immediately crash the primary database. Any collision is safely caught the moment the user attempts an atomic hold.
+Consequence: A seat that was claimed a fraction of a second ago might still appear available on an incoming user's screen. Attempting real-time strong consistency across 200,000 simultaneous browsing sessions would overwhelm the primary database with contention. Any collision is caught and handled safely the moment the user attempts an atomic hold.
 
 Virtual Waiting Room Queue vs. Immediate Checkout Access:
 
-Trade-off: Admitting users via a virtual tokenized queue creates user friction (waiting screens).
+Trade-off: Admitting users via a virtual tokenized queue creates intentional latency and waiting screens for users.
 
-Consequence: Users must wait their turn in line, but this design guarantees fairness, prevents bots from overwhelming checkout endpoints, and guarantees that admitted users experience a rapid, failure-free payment transaction.
+Consequence: Users cannot immediately jump into checkout, but this design guarantees fairness, stops automated bots from overwhelming checkout endpoints, and ensures that admitted users experience an error-free transaction without connection timeouts.
